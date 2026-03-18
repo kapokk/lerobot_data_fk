@@ -4,7 +4,7 @@ MeshCat visualizer for robot joint positions and end-effector frames from parque
 This tool:
 1. Loads robot URDF and parquet data with FK results
 2. Visualizes robot poses in MeshCat
-3. Shows end-effector frames (coordinate axes)
+3. Shows end-effector frames (coordinate axes) using meshcat-shapes
 4. Allows playback of trajectory data
 """
 
@@ -15,6 +15,7 @@ import pytorch_kinematics as pk
 import meshcat
 import meshcat.geometry as g
 import meshcat.transformations as tf
+import meshcat_shapes
 import time
 from typing import List, Dict, Optional, Tuple
 import threading
@@ -196,49 +197,25 @@ class MeshcatVisualizer:
                 g.MeshLambertMaterial(color=[0.2, 0.2, 0.8], opacity=0.8)
             )
 
-        # End-effector frames
-        self._create_ee_frame("left_ee", self.left_ee_color)
-        self._create_ee_frame("right_ee", self.right_ee_color)
+        # End-effector frames using meshcat-shapes
+        self._create_ee_frame_meshcat_shapes("left_ee", self.left_ee_color)
+        self._create_ee_frame_meshcat_shapes("right_ee", self.right_ee_color)
 
         print("Robot visualization created")
 
-    def _create_ee_frame(self, name: str, color: List[float]):
-        """Create coordinate frame visualization for end-effector."""
-        # X axis (red)
-        self.vis[f"frames/{name}/x"].set_object(
-            g.Cylinder(self.frame_scale, 0.005),
-            g.MeshLambertMaterial(color=[1.0, 0.0, 0.0], opacity=0.8)
-        )
-        self.vis[f"frames/{name}/x"].set_transform(
-            tf.translation_matrix([self.frame_scale/2, 0, 0]) @
-            tf.rotation_matrix(np.pi/2, [0, 1, 0])
-        )
-
-        # Y axis (green)
-        self.vis[f"frames/{name}/y"].set_object(
-            g.Cylinder(self.frame_scale, 0.005),
-            g.MeshLambertMaterial(color=[0.0, 1.0, 0.0], opacity=0.8)
-        )
-        self.vis[f"frames/{name}/y"].set_transform(
-            tf.translation_matrix([0, self.frame_scale/2, 0]) @
-            tf.rotation_matrix(np.pi/2, [1, 0, 0])
-        )
-
-        # Z axis (blue)
-        self.vis[f"frames/{name}/z"].set_object(
-            g.Cylinder(self.frame_scale, 0.005),
-            g.MeshLambertMaterial(color=[0.0, 0.0, 1.0], opacity=0.8)
-        )
-        self.vis[f"frames/{name}/z"].set_transform(
-            tf.translation_matrix([0, 0, self.frame_scale/2])
+    def _create_ee_frame_meshcat_shapes(self, name: str, color: List[float]):
+        """Create coordinate frame visualization for end-effector using meshcat-shapes."""
+        # Create frame using meshcat-shapes
+        meshcat_shapes.frame(
+            self.vis[f"frames/{name}"],
+            axis_length=self.frame_scale,
+            axis_thickness=0.005,
+            origin_radius=0.01,
+            opacity=0.8
         )
 
         # Store frame reference
-        self.ee_frames[name] = {
-            'x': f"frames/{name}/x",
-            'y': f"frames/{name}/y",
-            'z': f"frames/{name}/z"
-        }
+        self.ee_frames[name] = f"frames/{name}"
 
     def get_joint_dict(self, frame_idx: int) -> Dict[str, float]:
         """Extract joint positions as dictionary for given frame index."""
@@ -330,21 +307,32 @@ class MeshcatVisualizer:
         # For now, just update end-effector frames
         self.update_ee_frames(frame_idx)
 
-        # Update frame counter display
-        self.vis["info/frame"].set_object(
-            g.Text(f"Frame: {frame_idx}/{self.n_samples}"),
-            g.MeshBasicMaterial(color=[0, 0, 0])
+        # Update frame counter display using meshcat-shapes text
+        meshcat_shapes.textarea(
+            self.vis["info/frame"],
+            f"Frame: {frame_idx}/{self.n_samples}",
+            width=0.5,
+            height=0.1,
+            font_size=24,
+            color=0x000000,  # Black
+            background_color=0xFFFFFF,  # White
+            background_opacity=0.7
+        )
+        # Position the text in the top-left corner
+        self.vis["info/frame"].set_transform(
+            tf.translation_matrix([-0.6, 0.4, 0]) @
+            tf.scale_matrix(0.1)
         )
 
     def update_ee_frames(self, frame_idx: int):
         """Update end-effector frame visualizations."""
         # Left end-effector
         T_left = self.get_ee_pose(frame_idx, "left")
-        self.vis["frames/left_ee"].set_transform(T_left)
+        self.vis[self.ee_frames["left_ee"]].set_transform(T_left)
 
         # Right end-effector
         T_right = self.get_ee_pose(frame_idx, "right")
-        self.vis["frames/right_ee"].set_transform(T_right)
+        self.vis[self.ee_frames["right_ee"]].set_transform(T_right)
 
     def play(self, start_frame: int = 0, end_frame: Optional[int] = None):
         """Play back trajectory from start_frame to end_frame."""
@@ -463,20 +451,41 @@ def main():
     """Example usage of the MeshCat visualizer."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Visualize robot data with MeshCat")
+    parser = argparse.ArgumentParser(
+        description="Visualize robot data with MeshCat using meshcat-shapes",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Visualize single frame
+  python -m utils.meshcat_visualizer --urdf robot.urdf --data data.parquet --frame 50
+
+  # Play trajectory with custom frame size
+  python -m utils.meshcat_visualizer --urdf robot.urdf --data data.parquet --play --start 0 --end 500 --frame-scale 0.15
+
+  # Play at 2x speed
+  python -m utils.meshcat_visualizer --urdf robot.urdf --data data.parquet --play --speed 2.0
+
+Requirements:
+  Make sure meshcat-server is running: meshcat-server
+  Then open browser to: http://127.0.0.1:6000
+        """
+    )
     parser.add_argument("--urdf", required=True, help="Path to URDF file")
     parser.add_argument("--data", required=True, help="Path to parquet data file")
     parser.add_argument("--frame", type=int, default=0, help="Frame to visualize")
     parser.add_argument("--play", action="store_true", help="Play trajectory")
     parser.add_argument("--start", type=int, default=0, help="Start frame for playback")
     parser.add_argument("--end", type=int, help="End frame for playback")
-    parser.add_argument("--speed", type=float, default=1.0, help="Playback speed")
+    parser.add_argument("--speed", type=float, default=1.0, help="Playback speed (0.1 to 10.0)")
+    parser.add_argument("--frame-scale", type=float, default=0.1,
+                       help="Size of coordinate frames (default: 0.1)")
 
     args = parser.parse_args()
 
     # Create visualizer
     visualizer = MeshcatVisualizer(args.urdf, args.data)
     visualizer.set_playback_speed(args.speed)
+    visualizer.frame_scale = args.frame_scale  # Set frame scale
 
     if args.play:
         # Play trajectory

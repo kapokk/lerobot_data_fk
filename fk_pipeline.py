@@ -5,7 +5,12 @@ This pipeline:
 1. Reads URDF file to get robot model
 2. Loads joint position data from parquet file
 3. Performs forward kinematics in batch for both arms
-4. Writes FK results (position + quaternion) back to parquet file
+4. Writes structured FK results back to parquet file with columns:
+   - "qpos": Array of shape [num_traj, num_dim] containing all joint positions
+   - "joint_names": List of joint names corresponding to qpos dimensions
+   - "ee_pose": Array of shape [num_traj, num_ee, 7] containing xyzqwqxqyqz for each end-effector
+   - "ee_name": List of end-effector names
+   - "pose_format": String "xyzqwqxqyqz" indicating the pose format
 """
 
 import os
@@ -24,13 +29,14 @@ class FKPipeline:
 
         Args:
             urdf_path: Path to URDF file describing robot model
-            data_path: Path to input parquet file containing joint position data
-            output_path: Path to output parquet file for FK results
+            data_path: Path to input parquet file or list of files containing joint position data
+            output_path: Path to output parquet file or list of files for FK results
             device: Device to use for computation ('cuda' or 'cpu'). Auto-detects if None.
         """
         self.urdf_path = urdf_path
         self.data_path = data_path
         self.output_path = output_path
+        self.is_batch_mode = False  # Track if we're processing multiple files
 
         # Auto-detect device if not specified
         if device is None:
@@ -312,39 +318,91 @@ class FKPipeline:
               f"quaternions {self.right_fk_results[1].shape}")
 
     def prepare_output_data(self) -> pd.DataFrame:
-        """Prepare output DataFrame with FK results added as new columns."""
-        print("Preparing output data...")
+        """Prepare output DataFrame with structured columns as requested.
+
+        Creates columns:
+        - "qpos": Array of shape [num_traj, num_dim] containing all joint positions
+        - "joint_names": List of joint names corresponding to qpos dimensions
+        - "ee_pose": Array of shape [num_traj, num_ee, 7] containing xyzqwqxqyqz for each end-effector
+        - "ee_name": List of end-effector names
+        - "pose_format": String "xyzqwqxqyqz" indicating the pose format
+        """
+        print("Preparing output data with structured columns...")
 
         if self.left_fk_results is None or self.right_fk_results is None:
             raise ValueError("FK results not computed. Call run_fk_pipeline() first.")
 
-        # Create a copy of the original data
-        output_df = self.data.copy()
+        n_samples = len(self.data)
 
+        # 1. Create "qpos" column: [num_traj, num_dim] array
+        # Collect all joint positions
+        qpos_arrays = []
+        joint_names_list = []
+
+        # Left arm joints (0-6)
+        for i in range(7):
+            col_name = f"observation.state.left_arm_{i}"
+            if col_name in self.data.columns:
+                qpos_arrays.append(self.data[col_name].values.reshape(-1, 1))
+                joint_names_list.append(f"left_arm_{i}")
+
+        # Right arm joints (0-6)
+        for i in range(7):
+            col_name = f"observation.state.right_arm_{i}"
+            if col_name in self.data.columns:
+                qpos_arrays.append(self.data[col_name].values.reshape(-1, 1))
+                joint_names_list.append(f"right_arm_{i}")
+
+        # Torso joints (0-3)
+        for i in range(4):
+            col_name = f"torso_{i}"
+            if col_name in self.data.columns:
+                qpos_arrays.append(self.data[col_name].values.reshape(-1, 1))
+                joint_names_list.append(f"torso_{i}")
+
+        # Grippers
+        if "left_gripper_0" in self.data.columns:
+            qpos_arrays.append(self.data["left_gripper_0"].values.reshape(-1, 1))
+            joint_names_list.append("left_gripper")
+
+        if "right_gripper_0" in self.data.columns:
+            qpos_arrays.append(self.data["right_gripper_0"].values.reshape(-1, 1))
+            joint_names_list.append("right_gripper")
+
+        # Stack all joints horizontally: (n_samples, n_joints)
+        qpos_array = np.hstack(qpos_arrays) if qpos_arrays else np.zeros((n_samples, 0))
+
+        # 2. Create "ee_pose" column: [num_traj, num_ee, 7] array
         # Extract position and quaternion arrays
         left_pos, left_quat = self.left_fk_results
         right_pos, right_quat = self.right_fk_results
 
-        # Add left gripper FK results
-        output_df['left_gripper_x'] = left_pos[:, 0]
-        output_df['left_gripper_y'] = left_pos[:, 1]
-        output_df['left_gripper_z'] = left_pos[:, 2]
-        output_df['left_gripper_qw'] = left_quat[:, 0]
-        output_df['left_gripper_qx'] = left_quat[:, 1]
-        output_df['left_gripper_qy'] = left_quat[:, 2]
-        output_df['left_gripper_qz'] = left_quat[:, 3]
+        # Combine position and quaternion: [x, y, z, qw, qx, qy, qz]
+        left_pose = np.hstack([left_pos, left_quat])  # (n_samples, 7)
+        right_pose = np.hstack([right_pos, right_quat])  # (n_samples, 7)
 
-        # Add right gripper FK results
-        output_df['right_gripper_x'] = right_pos[:, 0]
-        output_df['right_gripper_y'] = right_pos[:, 1]
-        output_df['right_gripper_z'] = right_pos[:, 2]
-        output_df['right_gripper_qw'] = right_quat[:, 0]
-        output_df['right_gripper_qx'] = right_quat[:, 1]
-        output_df['right_gripper_qy'] = right_quat[:, 2]
-        output_df['right_gripper_qz'] = right_quat[:, 3]
+        # Stack for both end-effectors: (n_samples, 2, 7)
+        ee_pose_array = np.stack([left_pose, right_pose], axis=1)
+
+        # 3. Create output DataFrame with structured columns
+        output_data = {
+            "qpos": list(qpos_array),  # Store as list of arrays for parquet compatibility
+            "joint_names": [joint_names_list] * n_samples,  # Same for all rows
+            "ee_pose": list(ee_pose_array),  # Store as list of arrays
+            "ee_name": [["left_gripper", "right_gripper"]] * n_samples,  # Same for all rows
+            "pose_format": ["xyzqwqxqyqz"] * n_samples  # Same for all rows
+        }
+
+        # Create DataFrame
+        output_df = pd.DataFrame(output_data)
 
         print(f"Output DataFrame shape: {output_df.shape}")
-        print(f"New columns added: {[col for col in output_df.columns if 'gripper_' in col]}")
+        print(f"Columns: {list(output_df.columns)}")
+        print(f"qpos shape: {qpos_array.shape} (n_samples={n_samples}, n_joints={len(joint_names_list)})")
+        print(f"ee_pose shape: {ee_pose_array.shape} (n_samples={n_samples}, n_ee=2, pose_dim=7)")
+        print(f"Joint names: {joint_names_list}")
+        print(f"End-effector names: {['left_gripper', 'right_gripper']}")
+        print(f"Pose format: xyzqwqxqyqz")
 
         return output_df
 
@@ -368,6 +426,11 @@ class FKPipeline:
         print("Starting FK pipeline...")
 
         try:
+            # Check if we're processing multiple files
+            if isinstance(self.data_path, list) or isinstance(self.output_path, list):
+                return self.run_batch()
+
+            # Single file processing
             self.load_urdf()
             self.load_data()
             self.validate_data()
@@ -380,6 +443,86 @@ class FKPipeline:
         except Exception as e:
             print(f"Error in FK pipeline: {e}")
             raise
+
+    def run_batch(self):
+        """Run pipeline for multiple input/output files."""
+        print("Starting batch FK pipeline...")
+
+        import os
+
+        # Validate inputs and prepare file pairs
+        if isinstance(self.data_path, list) and isinstance(self.output_path, list):
+            if len(self.data_path) != len(self.output_path):
+                raise ValueError(f"Number of input files ({len(self.data_path)}) "
+                               f"does not match number of output files ({len(self.output_path)})")
+            file_pairs = list(zip(self.data_path, self.output_path))
+        elif isinstance(self.data_path, list):
+            # If only data_path is a list
+            if os.path.isdir(str(self.output_path)):
+                # output_path is a directory - create output filenames based on input filenames
+                output_dir = str(self.output_path)
+                file_pairs = []
+                for input_file in self.data_path:
+                    # Get filename from input path
+                    filename = os.path.basename(input_file)
+                    # Create output path in directory
+                    output_file = os.path.join(output_dir, filename)
+                    file_pairs.append((input_file, output_file))
+            else:
+                # output_path is a single file pattern (not supported for multiple inputs)
+                raise ValueError("For multiple input files, output_path must be a list or a directory")
+        elif isinstance(self.output_path, list):
+            # If only output_path is a list, use same data path (not typical but supported)
+            file_pairs = [(self.data_path, path) for path in self.output_path]
+        else:
+            raise ValueError("Batch mode requires at least one of data_path or output_path to be a list")
+
+        print(f"Processing {len(file_pairs)} file pairs")
+
+        # Load URDF once (shared for all files)
+        self.load_urdf()
+
+        # Process each file pair
+        for i, (input_file, output_file) in enumerate(file_pairs):
+            print(f"\n{'='*60}")
+            print(f"Processing file {i+1}/{len(file_pairs)}")
+            print(f"Input: {input_file}")
+            print(f"Output: {output_file}")
+            print(f"{'='*60}")
+
+            try:
+                # Set paths for this file
+                self.data_path = input_file
+                self.output_path = output_file
+
+                # Load data, validate, compute FK, and save
+                self.load_data()
+                self.validate_data()
+                self.run_fk_pipeline()
+                self.save_results()
+
+                print(f"Successfully processed: {input_file} -> {output_file}")
+
+            except Exception as e:
+                print(f"Error processing {input_file}: {e}")
+                # Continue with next file
+                continue
+
+            finally:
+                # Clear data for next iteration
+                self.data = None
+                self.left_arm_joints = None
+                self.right_arm_joints = None
+                self.torso_joints = None
+                self.left_gripper = None
+                self.right_gripper = None
+                self.left_fk_results = None
+                self.right_fk_results = None
+
+        print(f"\n{'='*60}")
+        print(f"Batch processing completed!")
+        print(f"Processed {len(file_pairs)} files")
+        print(f"{'='*60}")
 
     def set_batch_size(self, batch_size: int):
         """Set batch size for FK computation.
@@ -394,16 +537,108 @@ class FKPipeline:
 
 
 def main():
-    """Example usage of the FK pipeline."""
-    # TODO: Set your actual file paths
-    urdf_path = "path/to/robot.urdf"
-    data_path = "path/to/input_data.parquet"
-    output_path = "path/to/output_data.parquet"
+    """FK pipeline CLI that processes parquet files with forward kinematics.
 
-    # Create and run pipeline
-    pipeline = FKPipeline(urdf_path, data_path, output_path)
-    pipeline.set_batch_size(500)  # Optional: adjust batch size
-    pipeline.run()
+    Usage examples:
+        # Process a single parquet file
+        python fk_pipeline.py --urdf robot.urdf --input data.parquet --output results.parquet
+
+        # Process all parquet files in a folder
+        python fk_pipeline.py --urdf robot.urdf --input /path/to/data_folder --output /path/to/output_folder
+
+        # Process folder with custom batch size
+        python fk_pipeline.py --urdf robot.urdf --input /path/to/data_folder --batch-size 1000
+    """
+    import argparse
+    import os
+    import glob
+
+    parser = argparse.ArgumentParser(
+        description="Forward Kinematics pipeline for processing robot joint data",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Process single parquet file
+  python fk_pipeline.py --urdf robot.urdf --input data.parquet --output results.parquet
+
+  # Process all parquet files in folder, output to subfolder 'fk_results'
+  python fk_pipeline.py --urdf robot.urdf --input /path/to/data_folder
+
+  # Process folder with custom batch size
+  python fk_pipeline.py --urdf robot.urdf --input /path/to/data_folder --batch-size 1000
+
+  # Process folder and specify output folder
+  python fk_pipeline.py --urdf robot.urdf --input /path/to/data_folder --output /path/to/output_folder
+        """
+    )
+    parser.add_argument("--urdf", required=True, help="Path to URDF file")
+    parser.add_argument("--input", required=True, help="Input parquet file or folder containing parquet files")
+    parser.add_argument("--output", help="Output parquet file or folder. If input is a folder and output is not specified, creates 'fk_results' subfolder.")
+    parser.add_argument("--batch-size", type=int, default=1000, help="Batch size for FK computation (default: 1000)")
+
+    args = parser.parse_args()
+
+    # Check URDF file exists
+    if not os.path.exists(args.urdf):
+        raise FileNotFoundError(f"URDF file not found: {args.urdf}")
+
+    # Determine if input is a file or folder
+    if os.path.isfile(args.input):
+        # Single file processing
+        input_files = [args.input]
+        if args.output:
+            if os.path.isdir(args.output):
+                # Output is a directory, create output filename based on input filename
+                filename = os.path.basename(args.input)
+                output_path = os.path.join(args.output, filename)
+            else:
+                # Output is a file path
+                output_path = args.output
+        else:
+            # Default: add '_fk' suffix to input filename
+            base, ext = os.path.splitext(args.input)
+            output_path = f"{base}_fk{ext}"
+
+        print(f"Processing single file:")
+        print(f"  URDF: {args.urdf}")
+        print(f"  Input: {args.input}")
+        print(f"  Output: {output_path}")
+        print(f"  Batch size: {args.batch_size}")
+
+        pipeline = FKPipeline(args.urdf, input_files, output_path)
+        pipeline.set_batch_size(args.batch_size)
+        pipeline.run()
+
+    elif os.path.isdir(args.input):
+        # Folder processing: find all parquet files
+        parquet_files = glob.glob(os.path.join(args.input, "*.parquet"))
+        if not parquet_files:
+            raise FileNotFoundError(f"No .parquet files found in folder: {args.input}")
+
+        # Determine output directory
+        if args.output:
+            output_dir = args.output
+        else:
+            # Create 'fk_results' subfolder in input folder
+            output_dir = os.path.join(args.input, "fk_results")
+
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+
+        print(f"Processing folder:")
+        print(f"  URDF: {args.urdf}")
+        print(f"  Input folder: {args.input}")
+        print(f"  Found {len(parquet_files)} parquet files")
+        print(f"  Output folder: {output_dir}")
+        print(f"  Batch size: {args.batch_size}")
+
+        # Use batch mode with output directory
+        pipeline = FKPipeline(args.urdf, parquet_files, output_dir)
+        pipeline.set_batch_size(args.batch_size)
+        pipeline.run()
+
+    else:
+        raise FileNotFoundError(f"Input path does not exist: {args.input}")
 
 
 if __name__ == "__main__":
