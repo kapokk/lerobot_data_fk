@@ -59,9 +59,9 @@ class FKPipeline:
         self.dtype = torch.float32  # Data type for computation
 
         # Joint column patterns (based on your description)
-        self.left_arm_pattern = "observation.state.left_arm_{}"
-        self.right_arm_pattern = "observation.state.right_arm_{}"
-        self.torso_pattern = "torso_{}"
+        self.left_arm_pattern = "observation.state.left_arm"
+        self.right_arm_pattern = "observation.state.right_arm"
+        self.torso_pattern = "observation.state.torso"
         self.left_gripper_col = "left_gripper_0"
         self.right_gripper_col = "right_gripper_0"
 
@@ -132,16 +132,16 @@ class FKPipeline:
     def _extract_joint_arrays(self):
         """Extract joint position arrays from the loaded DataFrame."""
         # Left arm joints (0-6)
-        left_arm_cols = [self.left_arm_pattern.format(i) for i in range(7)]
-        self.left_arm_joints = self._extract_and_stack_columns(left_arm_cols)
+        left_arm_cols = [self.left_arm_pattern]
+        self.left_arm_joints = np.vstack(self._extract_and_stack_columns(left_arm_cols))
 
         # Right arm joints (0-6)
-        right_arm_cols = [self.right_arm_pattern.format(i) for i in range(7)]
-        self.right_arm_joints = self._extract_and_stack_columns(right_arm_cols)
+        right_arm_cols = [self.right_arm_pattern]
+        self.right_arm_joints = np.vstack(self._extract_and_stack_columns(right_arm_cols))
 
         # Torso joints (0-3)
-        torso_cols = [self.torso_pattern.format(i) for i in range(4)]
-        self.torso_joints = self._extract_and_stack_columns(torso_cols)
+        torso_cols = [self.torso_pattern]
+        self.torso_joints = np.vstack(self._extract_and_stack_columns(torso_cols))
 
         # Gripper positions
         self.left_gripper = self.data[self.left_gripper_col].values
@@ -264,15 +264,28 @@ class FKPipeline:
                 device=self.device
             )
 
+            # Extract batch for torso
+            torso_batch_np = self.torso_joints[i:batch_end]
+            torso_batch_torch = torch.from_numpy(torso_batch_np).to(
+                dtype=self.dtype,
+                device=self.device
+            )
+
+            # Concatenate torso with left arm joints
+            left_full_batch = torch.cat([torso_batch_torch, left_batch_torch], dim=1)
+
+            # Concatenate torso with right arm joints
+            right_full_batch = torch.cat([torso_batch_torch, right_batch_torch], dim=1)
+
             # Compute FK for left arm
             left_pos_batch, left_quat_batch = self.compute_fk_batch(
-                left_batch_torch,
+                left_full_batch,
                 self.left_arm_chain
             )
 
             # Compute FK for right arm
             right_pos_batch, right_quat_batch = self.compute_fk_batch(
-                right_batch_torch,
+                right_full_batch,
                 self.right_arm_chain
             )
 
