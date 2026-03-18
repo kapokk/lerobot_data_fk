@@ -68,8 +68,8 @@ class FKPipeline:
         self.left_arm_pattern = "observation.state.left_arm"
         self.right_arm_pattern = "observation.state.right_arm"
         self.torso_pattern = "observation.state.torso"
-        self.left_gripper_col = "left_gripper_0"
-        self.right_gripper_col = "right_gripper_0"
+        self.left_gripper_col = "observation.state.left_gripper"
+        self.right_gripper_col = "observation.state.right_gripper"
 
         # End effector links
         self.left_ee_link = "left_gripper_link"
