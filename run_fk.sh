@@ -1,0 +1,1 @@
+python fk_pipeline.py --urdf-path urdf/robot.urdf --data-path data/input.parquet --output-path data/output.parquet
