@@ -392,19 +392,7 @@ class FKPipeline:
             "ee_name": [["left_gripper", "right_gripper"]] * n_samples,  # Same for all rows
             "pose_format": ["xyzqwqxqyqz"] * n_samples  # Same for all rows
         }
-
-        # Create DataFrame
-        output_df = pd.DataFrame(output_data)
-
-        print(f"Output DataFrame shape: {output_df.shape}")
-        print(f"Columns: {list(output_df.columns)}")
-        print(f"qpos shape: {qpos_array.shape} (n_samples={n_samples}, n_joints={len(joint_names_list)})")
-        print(f"ee_pose shape: {ee_pose_array.shape} (n_samples={n_samples}, n_ee=2, pose_dim=7)")
-        print(f"Joint names: {joint_names_list}")
-        print(f"End-effector names: {['left_gripper', 'right_gripper']}")
-        print(f"Pose format: xyzqwqxqyqz")
-
-        return output_df
+        return output_data
 
     def save_results(self):
         """Save FK results to parquet file."""
@@ -413,12 +401,12 @@ class FKPipeline:
         # Prepare output data
         output_df = self.prepare_output_data()
 
-        # Save using parquent_loader
-        from loader.parquent_loader import parquent_loader
-        loader = parquent_loader(self.output_path)
-        loader.data = output_df
-        loader.save()
-
+        # Save using pickle
+        import pickle
+        
+        with open(self.output_path, 'wb') as f:
+            pickle.dump(output_df, f)
+        
         print(f"Results saved successfully to {self.output_path}")
 
     def run(self):
@@ -465,6 +453,8 @@ class FKPipeline:
                 for input_file in self.data_path:
                     # Get filename from input path
                     filename = os.path.basename(input_file)
+                    # Change extension to .pkl
+                    filename = os.path.splitext(filename)[0] + '.pkl'
                     # Create output path in directory
                     output_file = os.path.join(output_dir, filename)
                     file_pairs.append((input_file, output_file))
